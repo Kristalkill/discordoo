@@ -1,5 +1,6 @@
-import { DefaultCacheProvider } from '@src/cache/DefaultCacheProvider'
+export { CachingPoliciesProcessor } from '@src/cache/CachingPoliciesProcessor'
+export { DefaultCacheProvider } from '@src/cache/DefaultCacheProvider'
+export { CacheManager } from '@src/cache/CacheManager'
 
-export {
-  DefaultCacheProvider
-}
+export * from './interfaces'
+export * from './polyfills'

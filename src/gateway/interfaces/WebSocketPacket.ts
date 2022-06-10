@@ -1,9 +1,9 @@
-import { WebSocketOpCodes } from '@src/constants'
-import { GatewayDispatchEvents } from 'discord-api-types'
+import { WebSocketDispatchEvents } from '@src/constants'
+import { GatewayOpCodes } from '@discordoo/providers'
 
 export interface WebSocketPacket {
-  op: WebSocketOpCodes
+  op: GatewayOpCodes
   d: any
   s: number | undefined
-  t: GatewayDispatchEvents
+  t: WebSocketDispatchEvents
 }

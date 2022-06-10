@@ -1,6 +1,10 @@
 import { Client, ClientOptions, DefaultClientStack, ProviderConstructor } from '@src/core'
 import { DiscordooProviders } from '@src/constants'
 import { CreateAppOptions } from '@src/wrapper/interfaces/CreateAppOptions'
+import { is } from 'typescript-is'
+import { ValidationError } from '@src/utils/ValidationError'
+import { GatewayOptions } from '@src/gateway'
+import { ReplaceType } from '@src/utils'
 
 export class ClientBuilder<Stack extends DefaultClientStack = DefaultClientStack> {
   public token: string
@@ -9,6 +13,8 @@ export class ClientBuilder<Stack extends DefaultClientStack = DefaultClientStack
   private readonly customClient: any
 
   constructor(token: string, options?: CreateAppOptions) {
+    if (!is<string>(token)) throw new ValidationError('ClientBuilder', 'Invalid token provided:', token)
+
     this.token = token
 
     this.options = {}
@@ -18,22 +24,37 @@ export class ClientBuilder<Stack extends DefaultClientStack = DefaultClientStack
   }
 
   rest(options: ClientOptions['rest']): ClientBuilder<Stack> {
+    if (!is<ClientOptions['rest']>(options)) this.throwInvalidOptionsError('rest', options)
+
     this.options.rest = options
     return this
   }
 
   gateway(options: ClientOptions['gateway']): ClientBuilder<Stack> {
+    if (!is<ReplaceType<GatewayOptions, 'intents', number | number[]> | undefined>(options)) {
+      this.throwInvalidOptionsError('gateway', options)
+    }
+
     this.options.gateway = options
     return this
   }
 
   cache(options: ClientOptions['cache']): ClientBuilder<Stack> {
+    if (!is<ClientOptions['cache']>(options)) this.throwInvalidOptionsError('cache', options)
+
     this.options.cache = options
     return this
   }
 
   ipc(options: ClientOptions['ipc']): ClientBuilder<Stack> {
+    if (!is<ClientOptions['ipc']>(options)) this.throwInvalidOptionsError('ipc', options)
+
     this.options.ipc = options
+    return this
+  }
+
+  extenders(extenders: ClientOptions['extenders']): ClientBuilder<Stack> {
+    this.options.extenders = extenders
     return this
   }
 
@@ -65,6 +86,13 @@ export class ClientBuilder<Stack extends DefaultClientStack = DefaultClientStack
     })
 
     return this
+  }
+
+  private throwInvalidOptionsError(from: string, invalid: any) {
+    throw new ValidationError(
+      `${this.constructor.name}#${from} | createApp#${from}`,
+      'invalid', from, 'options provided'
+    )._setInvalidOptions(invalid)
   }
 
   build<T extends Client = Client<Stack>>(): T {

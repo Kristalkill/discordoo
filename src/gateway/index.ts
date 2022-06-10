@@ -1,26 +1,7 @@
-import { WebSocketClientEventsI } from '@src/gateway/interfaces/WebSocketClientEventsI'
-import { WebSocketClientDestroyOptions } from '@src/gateway/interfaces/WebSocketClientDestroyOptions'
-import { PartialGatewayOptions } from '@src/gateway/interfaces/PartialGatewayOptions'
-import { WebSocketManagerEvents } from '@src/gateway/interfaces/WebSocketManagerEvents'
-import { WebSocketManagerLimits } from '@src/gateway/interfaces/WebSocketManagerLimits'
-import { WebSocketSendPayload } from '@src/gateway/interfaces/WebSocketSendPayload'
-import { WebSocketPacket } from '@src/gateway/interfaces/WebSocketPacket'
-import { GatewayOptions } from '@src/gateway/interfaces/GatewayOptions'
+export { DefaultGatewayProvider } from '@src/gateway/DefaultGatewayProvider'
+export { WebSocketManager } from '@src/gateway/WebSocketManager'
+export { WebSocketClient } from '@src/gateway/WebSocketClient'
+export { GatewayManager } from '@src/gateway/GatewayManager'
 
-import { DefaultGatewayProvider } from '@src/gateway/DefaultGatewayProvider'
-import { WebSocketManager } from '@src/gateway/WebSocketManager'
-import { WebSocketClient } from '@src/gateway/WebSocketClient'
-
-export {
-  WebSocketClientEventsI,
-  WebSocketClientDestroyOptions,
-  PartialGatewayOptions,
-  WebSocketManagerEvents,
-  WebSocketManagerLimits,
-  WebSocketSendPayload,
-  WebSocketPacket,
-  GatewayOptions,
-  DefaultGatewayProvider,
-  WebSocketManager,
-  WebSocketClient,
-}
+export * from './client'
+export * from './interfaces'

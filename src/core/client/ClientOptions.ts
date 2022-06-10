@@ -1,15 +1,25 @@
 import { ProviderOption } from '@src/core'
-import { GatewayOptions } from '@src/gateway'
-import { Optional } from '@src/utils'
-import { IpcServerOptions } from '@src/sharding'
-import { CachingOptions } from '@src/cache/interfaces/CachingOptions'
+import { CompletedGatewayOptions, GatewayOptions } from '@src/gateway'
+import { CacheOptions } from '@src/cache/interfaces/CacheOptions'
 import { RestOptions } from '@src/rest/interfaces/RestOptions'
+import { ExtendedEntityOption } from '@src/core/client/ExtendedEntityOption'
+import { CompletedLocalIpcOptions } from '@src/constants/sharding/CompletedLocalIpcOptions'
+import { CompletedCacheOptions } from '@src/cache'
+import { CompletedRestOptions } from '@src/rest'
 
 export interface ClientOptions<CustomOptions = any> {
   providers?: ProviderOption[]
-  gateway?: Optional<GatewayOptions, 'token' | 'intents' | 'properties'>
-  cache?: CachingOptions
+  gateway?: GatewayOptions
+  cache?: CacheOptions
   rest?: RestOptions
-  ipc?: Optional<IpcServerOptions, 'instanceIpc' | 'managerIpc' | 'instance'>
+  ipc?: CompletedLocalIpcOptions
   custom?: CustomOptions
+  extenders?: ExtendedEntityOption[]
+}
+
+export interface CompletedClientOptions {
+  gateway: CompletedGatewayOptions
+  cache: CompletedCacheOptions
+  rest: CompletedRestOptions
+  ipc: CompletedLocalIpcOptions
 }

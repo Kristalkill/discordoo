@@ -1,10 +1,11 @@
 {
   "packages": [
+    "api",
+    "events",
     "cache",
     "collection",
     "constants",
     "core",
-    "entities",
     "rest",
     "sharding",
     "utils",

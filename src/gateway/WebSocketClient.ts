@@ -4,41 +4,39 @@ import WebSocket from 'ws'
 import { TypedEmitter } from 'tiny-typed-emitter'
 
 import { WebSocketClientDestroyOptions } from '@src/gateway/interfaces/WebSocketClientDestroyOptions'
-import { WebSocketClientEventsI } from '@src/gateway/interfaces/WebSocketClientEventsI'
-import { WebSocketSendPayload } from '@src/gateway/interfaces/WebSocketSendPayload'
+import { WebSocketClientEventsHandlers } from '@src/gateway/interfaces/WebSocketClientEventsHandlers'
+import { CompletedGatewayOptions } from '@src/gateway/interfaces/GatewayOptions'
+import { GatewayOpCodes, GatewaySendPayloadLike } from '@discordoo/providers'
 import { WebSocketPacket } from '@src/gateway/interfaces/WebSocketPacket'
-import { GatewayOptions } from '@src/gateway/interfaces/GatewayOptions'
 import {
   WebSocketClientEvents,
   WebSocketClientStates,
-  WebSocketOpCodes,
-  WebSocketStates,
-  WS_HANDSHAKE_TIMEOUT
+  WebSocketStates
 } from '@src/constants'
 
 import { WebSocketManager } from '@src/gateway/WebSocketManager'
 import { WebSocketUtils } from '@src/utils/WebSocketUtils'
 import { DiscordooError } from '@src/utils/DiscordooError'
 
-import { identify } from '@src/gateway/wsclient/identify'
-import { message } from '@src/gateway/wsclient/events/message'
-import { packet } from '@src/gateway/wsclient/events/packet'
-import { error } from '@src/gateway/wsclient/events/error'
-import { close } from '@src/gateway/wsclient/events/close'
-import { open } from '@src/gateway/wsclient/events/open'
+import { identify } from '@src/gateway/client/identify'
+import { message } from '@src/gateway/client/message'
+import { packet } from '@src/gateway/client/packet'
+import { error } from '@src/gateway/client/error'
+import { close } from '@src/gateway/client/close'
+import { open } from '@src/gateway/client/open'
 
-export class WebSocketClient extends TypedEmitter<WebSocketClientEventsI> {
+export class WebSocketClient extends TypedEmitter<WebSocketClientEventsHandlers> {
   private socket?: WebSocket
-  private readonly options: GatewayOptions
+  private readonly options: CompletedGatewayOptions
   private inflate?: PakoTypes.Inflate
-  private _heartbeatInterval?: NodeJS.Timeout
-  private _handshakeTimeout?: NodeJS.Timeout
+  private _heartbeatInterval?: ReturnType<typeof setInterval>
+  private _handshakeTimeout?: ReturnType<typeof setTimeout>
 
   public manager: WebSocketManager
   public status: WebSocketClientStates
   public id: number
 
-  public sessionID?: string
+  public sessionId?: string
   public sequence = -1
   public closeSequence = -1
   public expectedGuilds: Set<any> = new Set()
@@ -57,10 +55,11 @@ export class WebSocketClient extends TypedEmitter<WebSocketClientEventsI> {
   }
 
   public connect() {
+    // console.log('SHARD', this.id, 'CONNECTING with intents', this.options.intents)
     return new Promise<void>((resolve, reject) => {
 
       // cannot connect without websocket url
-      if (!this.options?.url) return reject()
+      if (!this.options.connection.url) return reject()
 
       // WebSocketClient already connected and working
       if (this.socket?.readyState === WebSocketStates.OPEN && this.status === WebSocketClientStates.READY) {
@@ -68,11 +67,11 @@ export class WebSocketClient extends TypedEmitter<WebSocketClientEventsI> {
       }
 
       // create decompressing context if developer wants use compression between us and discord
-      if (this.options.compress) {
+      if (this.options.connection.compress) {
         if (!WebSocketUtils.pako) {
           throw new DiscordooError(
             'WebSocketShard ' + this.id,
-            'gateway compression requires pako module installed. npm i pako@1.0.11'
+            'gateway compression requires pako/zlib-sync module installed. npm i pako@1.0.11 / npm i zlib-sync'
           )
         } else {
           this.inflate = new WebSocketUtils.pako.Inflate({
@@ -84,11 +83,10 @@ export class WebSocketClient extends TypedEmitter<WebSocketClientEventsI> {
       // console.log('SHARD', this.id, 'ENCODING', this.options.encoding, 'REAL ENCODING', WebSocketUtils.encoding)
 
       // cannot use etf encoding without erlpack
-      if (this.options.encoding === 'etf' && WebSocketUtils.encoding !== 'etf') {
+      if (this.options.connection.encoding === 'etf' && WebSocketUtils.encoding !== 'etf') {
         throw new DiscordooError(
           'WebSocketShard ' + this.id,
-          'cannot use etf encoding without erlpack installed.',
-          '(if you are using worker threads sharding, node.js cannot use external modules inside workers)'
+          'cannot use etf encoding without erlpack installed.'
         )
       }
 
@@ -98,8 +96,8 @@ export class WebSocketClient extends TypedEmitter<WebSocketClientEventsI> {
 
       const ready   = () => { cleanup(); resolve() },
             resumed = () => { cleanup(); resolve() },
-            invalid = () => { cleanup(); reject() },
-            closed  = () => { cleanup(); reject() }
+            invalid = (e: WebSocket.CloseEvent) => { cleanup(); reject({ code: e.code, reason: 'Invalid session' }) },
+            closed  = (e: WebSocket.CloseEvent) => { cleanup(); reject({ code: e.code, reason: e.reason }) }
 
       /**
        * when we call WebSocketClient#connect, it returns a promise.
@@ -114,7 +112,6 @@ export class WebSocketClient extends TypedEmitter<WebSocketClientEventsI> {
         direction.call(client, WebSocketClientEvents.READY, ready)
         direction.call(client, WebSocketClientEvents.RESUMED, resumed)
         direction.call(client, WebSocketClientEvents.INVALID_SESSION, invalid)
-        direction.call(client, WebSocketClientEvents.DESTROYED, invalid)
       }
 
       cleanupOrListen(this, true)
@@ -133,8 +130,8 @@ export class WebSocketClient extends TypedEmitter<WebSocketClientEventsI> {
         : WebSocketClientStates.CONNECTING
 
       try {
-        // console.log('shard', this.id, 'creating websocket')
-        this.socket = new WebSocket(this.options.url)
+        // console.log('shard', this.id, 'creating websocket', this.options.url)
+        this.socket = new WebSocket(this.options.connection.url)
 
         this.handshakeTimeout()
         // console.log('shard', this.id, 'subscribe')
@@ -143,7 +140,7 @@ export class WebSocketClient extends TypedEmitter<WebSocketClientEventsI> {
         this.socket.onerror = this.onError.bind(this)
         this.socket.onmessage = this.onMessage.bind(this)
       } catch (e) {
-        console.error('shard', this.id, 'error', e)
+        // console.error('shard', this.id, 'error', e)
         this.status = WebSocketClientStates.DISCONNECTED
         reject()
       }
@@ -159,7 +156,7 @@ export class WebSocketClient extends TypedEmitter<WebSocketClientEventsI> {
   /**
    * this method operates with handshake timeout:
    * when handshake did not occur at the specified time,
-   * reconnects client
+   * it reconnects the client
    * */
   public handshakeTimeout(create = true) {
     if (this._handshakeTimeout) {
@@ -167,7 +164,7 @@ export class WebSocketClient extends TypedEmitter<WebSocketClientEventsI> {
     } else if (create) {
       this._handshakeTimeout = setTimeout(() => {
         this.destroy({ reconnect: true })
-      }, WS_HANDSHAKE_TIMEOUT)
+      }, 15000 /* TODO: this.options.handshakeTimeout */)
     }
   }
 
@@ -204,11 +201,14 @@ export class WebSocketClient extends TypedEmitter<WebSocketClientEventsI> {
     if (!shouldIgnoreAck) this.missedHeartbeats += 1
 
     this.lastPingTimestamp = Date.now()
-    this.socketSend({ op: WebSocketOpCodes.HEARTBEAT, d: this.sequence })
+    this.socketSend({ op: GatewayOpCodes.HEARTBEAT, d: this.sequence })
   }
 
-  public socketSend(data: WebSocketSendPayload) {
-    if (!this.socket) return
+  public socketSend(data: GatewaySendPayloadLike) {
+    if (!this.socket) {
+      this.emit(WebSocketClientEvents.WS_SEND_ERROR, new Error('Tried to send packet, but no WebSocket was found'), data)
+      return
+    }
 
     // console.log('shard', this.id, 'send:', data)
 
@@ -252,21 +252,12 @@ export class WebSocketClient extends TypedEmitter<WebSocketClientEventsI> {
     ) {
       // console.log('shard', this.id, 'if this socket and dont ready')
       try {
-        if (options.reconnect && this.sessionID) {
-          // console.log('shard', this.id, 'if options reconnect and sessionid')
-          if (this.options.useReconnectOnly) {
-            // console.log('shard', this.id, 'if useReconnectOnly')
-            this.sessionID = undefined
-            this.sequence = -1
-            this.socket.close(1000, 'ddoo: reconnect without resume')
-          } else {
-            // console.log('shard', this.id, '!useReconnectOnly')
-            this.closeSequence = this.sequence
-            this.sequence = -1
-            this.socket.close(4901, 'ddoo: reconnect with resume')
-          }
+        if (options.reconnect && this.sessionId) {
+          this.closeSequence = this.sequence
+          this.sequence = -1
+          this.socket.close(4901, 'ddoo: reconnect with resume')
         }
-      } catch (e) {
+      } catch (e: any) {
         // console.log('shard', this.id, 'ws close error:', e)
         this.emit(WebSocketClientEvents.WS_CLOSE_ERROR, e)
       }

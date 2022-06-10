@@ -1,15 +1,14 @@
-import { cacheProviderFilterPolyfill } from '@src/cache/polyfills/cacheProviderFilterPolyfill'
-import { cacheProviderFindPolyfill } from '@src/cache/polyfills/cacheProviderFindPolyfill'
-import { cacheProviderHasPolyfill } from '@src/cache/polyfills/cacheProviderHasPolyfill'
-import { cacheProviderMapPolyfill } from '@src/cache/polyfills/cacheProviderMapPolyfill'
-import { cacheProviderSizePolyfill } from '@src/cache/polyfills/cacheProviderSizePolyfill'
-import { cacheProviderSweepPolyfill } from '@src/cache/polyfills/cacheProviderSweepPolyfill'
+export { cacheProviderFilterPolyfill } from '@src/cache/polyfills/cacheProviderFilterPolyfill'
+export { cacheProviderSweepPolyfill } from '@src/cache/polyfills/cacheProviderSweepPolyfill'
+export { cacheProviderFindPolyfill } from '@src/cache/polyfills/cacheProviderFindPolyfill'
+export { cacheProviderHasPolyfill } from '@src/cache/polyfills/cacheProviderHasPolyfill'
+export { cacheProviderMapPolyfill } from '@src/cache/polyfills/cacheProviderMapPolyfill'
+export { cacheProviderSizePolyfill } from '@src/cache/polyfills/cacheProviderSizePolyfill'
+export { cacheProviderClearPolyfill } from '@src/cache/polyfills/cacheProviderClearPolyfill'
+export { cacheProviderCountsPolyfill } from '@src/cache/polyfills/cacheProviderCountsPolyfill'
 
-export {
-  cacheProviderFilterPolyfill,
-  cacheProviderFindPolyfill,
-  cacheProviderHasPolyfill,
-  cacheProviderMapPolyfill,
-  cacheProviderSizePolyfill,
-  cacheProviderSweepPolyfill,
-}
+// breaks the pyramid
+export { cacheProviderEntriesPolyfill } from '@src/cache/polyfills/cacheProviderEntriesPolyfill'
+export { cacheProviderValuesPolyfill } from '@src/cache/polyfills/cacheProviderValuesPolyfill'
+export { cacheProviderCountPolyfill } from '@src/cache/polyfills/cacheProviderCountPolyfill'
+export { cacheProviderKeysPolyfill } from '@src/cache/polyfills/cacheProviderKeysPolyfill'

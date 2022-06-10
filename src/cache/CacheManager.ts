@@ -1,11 +1,18 @@
 import { CachingPoliciesProcessor } from '@src/cache/CachingPoliciesProcessor'
 import { IpcCacheOpCodes, IpcOpCodes, SerializeModes } from '@src/constants'
-import { CacheProvider, Client, ProviderConstructor } from '@src/core'
-import { resolveShards, DiscordooError } from '@src/utils'
-import { EntitiesUtil, EntityKey } from '@src/entities'
+import { CacheProvider, CacheStorageKey } from '@discordoo/providers'
+import { DiscordooError, resolveDiscordooShards, WebSocketUtils } from '@src/utils'
+import { Client, ProviderConstructor } from '@src/core'
+import { EntityKey } from '@src/api/entities'
 import {
+  IpcCacheClearRequestPacket,
+  IpcCacheClearResponsePacket,
+  IpcCacheCountRequestPacket,
+  IpcCacheCountResponsePacket,
+  IpcCacheCountsRequestPacket,
+  IpcCacheCountsResponsePacket,
   IpcCacheDeleteRequestPacket,
-  IpcCacheDeleteResponsePacket,
+  IpcCacheDeleteResponsePacket, IpcCacheEntriesRequestPacket, IpcCacheEntriesResponsePacket,
   IpcCacheFilterRequestPacket,
   IpcCacheFilterResponsePacket,
   IpcCacheFindRequestPacket,
@@ -15,7 +22,7 @@ import {
   IpcCacheGetRequestPacket,
   IpcCacheGetResponsePacket,
   IpcCacheHasRequestPacket,
-  IpcCacheHasResponsePacket,
+  IpcCacheHasResponsePacket, IpcCacheKeysRequestPacket, IpcCacheKeysResponsePacket,
   IpcCacheMapRequestPacket,
   IpcCacheMapResponsePacket,
   IpcCacheSetRequestPacket,
@@ -23,41 +30,52 @@ import {
   IpcCacheSizeRequestPacket,
   IpcCacheSizeResponsePacket,
   IpcCacheSweepRequestPacket,
-  IpcCacheSweepResponsePacket
+  IpcCacheSweepResponsePacket, IpcCacheValuesRequestPacket, IpcCacheValuesResponsePacket
 } from '@src/sharding/interfaces/ipc/IpcPackets'
 import {
+  cacheProviderKeysPolyfill,
+  cacheProviderClearPolyfill,
+  cacheProviderCountPolyfill,
+  cacheProviderCountsPolyfill,
   cacheProviderFilterPolyfill,
   cacheProviderFindPolyfill,
   cacheProviderHasPolyfill,
   cacheProviderMapPolyfill,
   cacheProviderSizePolyfill,
-  cacheProviderSweepPolyfill
+  cacheProviderSweepPolyfill, cacheProviderValuesPolyfill, cacheProviderEntriesPolyfill,
 } from '@src/cache/polyfills'
 import {
-  CacheManagerForEachOptions,
-  CacheManagerDeleteOptions,
+  CacheManagerClearOptions,
+  CacheManagerCountOptions,
+  CacheManagerCountsOptions,
+  CacheManagerData,
+  CacheManagerDeleteOptions, CacheManagerEntriesOptions,
   CacheManagerFilterOptions,
-  CacheManagerSweepOptions,
-  CacheManagerSizeOptions,
   CacheManagerFindOptions,
+  CacheManagerForEachOptions,
   CacheManagerGetOptions,
-  CacheManagerHasOptions,
+  CacheManagerHasOptions, CacheManagerKeysOptions,
   CacheManagerMapOptions,
   CacheManagerSetOptions,
-  CacheManagerOptions,
-  CacheStorageKey
+  CacheManagerSizeOptions,
+  CacheManagerSweepOptions, CacheManagerValuesOptions,
+  CacheOptions,
+  CachePointer,
 } from '@src/cache/interfaces'
+import { EntitiesUtil } from '@src/api/entities/EntitiesUtil'
+import { toJson } from '@src/utils/toJson'
+import { isCachePointer } from '@src/utils/cachePointer'
 
 export class CacheManager<P extends CacheProvider = CacheProvider> {
   public client: Client
   public provider: P
 
-  private policiesProcessor: CachingPoliciesProcessor
+  private readonly _policiesProcessor: CachingPoliciesProcessor
 
-  constructor(client: Client, provider: ProviderConstructor<P>, options: CacheManagerOptions) {
+  constructor(client: Client, Provider: ProviderConstructor<P>, data: CacheManagerData) {
     this.client = client
-    this.provider = new provider(this.client, options.provider)
-    this.policiesProcessor = new CachingPoliciesProcessor(client)
+    this.provider = new Provider(this.client, data.cacheOptions, data.providerOptions)
+    this._policiesProcessor = new CachingPoliciesProcessor(this.client)
   }
 
   async get<K = string, V = any>(
@@ -65,12 +83,12 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
     storage: CacheStorageKey,
     entityKey: EntityKey,
     key: K,
-    options: CacheManagerGetOptions = {}
+    options: CacheManagerGetOptions & { __ddcp?: boolean } = {}
   ): Promise<V | undefined> {
     let result: any
 
-    if (typeof options?.shard !== 'undefined' && this.client.internals.sharding.active && !this.provider.sharedCache) {
-      const shards = resolveShards(this.client, options.shard)
+    if (this.isShardedRequest(options)) {
+      const shards = resolveDiscordooShards(this.client, options.shard!)
 
       const request: IpcCacheGetRequestPacket = {
         op: IpcOpCodes.CACHE_OPERATE,
@@ -79,8 +97,8 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
           event_id: this.client.internals.ipc.generate(),
           key,
           keyspace,
-          storage,
-          entityKey,
+          storage: options?.storage ?? storage,
+          entity_key: entityKey,
           shards,
           serialize: SerializeModes.ANY
         }
@@ -94,11 +112,22 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
       }
 
     } else {
-      result = await this.provider.get<K, V>(keyspace, storage, key)
+      result = await this.provider.get<K, V>(keyspace, options?.storage ?? storage, key)
     }
 
-    const entity: any = EntitiesUtil.get(entityKey)
-    if (result && !(result instanceof entity)) result = await (new entity(this.client, result)).init?.()
+    const pointer = isCachePointer(result)
+
+    if (pointer) {
+      // __ddcp option means that previous value are cache pointer. cache pointer cannot point to another cache pointer.
+      if (options.__ddcp) {
+        // console.log('recursive cache pointer', pointer)
+        return undefined
+      }
+      // console.log('get pointer', pointer)
+      return this.get(pointer[0], pointer[1], entityKey, pointer[2], { ...options, storage: pointer[1], __ddcp: true })
+    }
+
+    result = await this._prepareData('out', result, entityKey)
 
     return result
   }
@@ -107,27 +136,53 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
     keyspace: string,
     storage: CacheStorageKey,
     entityKey: EntityKey,
+    policy: keyof CacheOptions = 'global',
     key: K,
-    value: V,
+    value: V | CachePointer,
     options: CacheManagerSetOptions = {}
   ): Promise<this> {
-    const globalPolicyLimit = this.policiesProcessor.global(value)
-    if (typeof globalPolicyLimit !== 'undefined') {
-      if (!globalPolicyLimit) return this
+    if (typeof value !== 'object' && typeof value !== 'string'!) {
+      throw new DiscordooError(
+        'CacheManager#set',
+        'Cache cannot operate with anything expect objects. Received',
+        value === null ? 'null' : typeof value
+      )
     }
 
-    let v: any = value
+    let limited = false, shouldClear = true
 
-    if (!this.provider.classesCompatible || this.isShardedRequest(options)) {
-      // @ts-expect-error
-      if (typeof value.toJSON === 'function') value = value.toJSON()
-    } else {
-      const entity: any = EntitiesUtil.get(entityKey)
-      if (value && !(value instanceof entity)) v = await (new entity(this.client, value)).init?.()
+    /**
+     * When entityKey is unknown or value is a cachePointer, do not apply cache policies.
+     * When the global cache policy allows or does not allow writing, use only this value.
+     * When the global cache policy is not in effect, use the specified cache policy.
+     * If any cache policy prohibits writing, clear the existing cache.
+     * */
+    if (entityKey !== 'any') {
+      const pointer = isCachePointer(value)
+
+      if (pointer) {
+        const allowed = await this.has(pointer[0], pointer[1], pointer[2])
+        limited = !allowed
+        shouldClear = limited
+      } else {
+        const globalAllowed = await this._policiesProcessor.global(value)
+        if (globalAllowed !== undefined) {
+          limited = !globalAllowed
+        } else {
+          limited = !(await this._policiesProcessor[policy](value))
+        }
+      }
     }
+
+    if (limited) {
+      if (shouldClear) await this.delete(keyspace, storage, key, options)
+      return this
+    }
+
+    const data = await this._prepareData('in', value, entityKey, this.isShardedRequest(options))
 
     if (this.isShardedRequest(options)) {
-      const shards = resolveShards(this.client, options.shard!)
+      const shards = resolveDiscordooShards(this.client, options.shard!)
 
       const request: IpcCacheSetRequestPacket = {
         op: IpcOpCodes.CACHE_OPERATE,
@@ -136,10 +191,11 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
           event_id: this.client.internals.ipc.generate(),
           key,
           keyspace,
-          storage,
-          entityKey,
+          storage: options.storage ?? storage,
+          entity_key: entityKey,
           shards,
-          value,
+          policy,
+          value: data,
           serialize: SerializeModes.BOOLEAN
         }
       }
@@ -152,7 +208,7 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
       }
 
     } else {
-      await this.provider.set<K, V>(keyspace, storage, key, v)
+      await this.provider.set<K, V>(keyspace, options.storage ?? storage, key, data)
     }
 
     return this
@@ -165,7 +221,7 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
     options: CacheManagerDeleteOptions = {}
   ): Promise<boolean> {
     if (this.isShardedRequest(options)) {
-      const shards = resolveShards(this.client, options.shard!)
+      const shards = resolveDiscordooShards(this.client, options.shard!)
 
       const request: IpcCacheDeleteRequestPacket = {
         op: IpcOpCodes.CACHE_OPERATE,
@@ -174,7 +230,7 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
           event_id: this.client.internals.ipc.generate(),
           key,
           keyspace,
-          storage,
+          storage: options?.storage ?? storage,
           shards,
           serialize: SerializeModes.BOOLEAN
         }
@@ -186,7 +242,7 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
       return response.success
 
     } else {
-      return this.provider.delete<K>(keyspace, storage, key)
+      return this.provider.delete<K>(keyspace, options?.storage ?? storage, key)
     }
   }
 
@@ -198,7 +254,7 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
     options: CacheManagerForEachOptions = {}
   ): Promise<void> {
     if (this.isShardedRequest(options)) {
-      const shards = resolveShards(this.client, options.shard!)
+      const shards = resolveDiscordooShards(this.client, options.shard!)
 
       const request: IpcCacheForEachRequestPacket = {
         op: IpcOpCodes.CACHE_OPERATE,
@@ -206,8 +262,8 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
           op: IpcCacheOpCodes.FOREACH,
           event_id: this.client.internals.ipc.generate(),
           keyspace,
-          storage,
-          entityKey,
+          storage: options?.storage ?? storage,
+          entity_key: entityKey,
           shards,
           script: `(${predicate})`
         }
@@ -216,10 +272,10 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
       await this.client.internals.ipc.send<IpcCacheForEachResponsePacket>(request, { waitResponse: true })
 
     } else {
-      await this.provider.forEach<K, V, P>(keyspace, storage, this._makePredicate(entityKey, predicate))
+      await this.provider.forEach<K, V, P>(keyspace, options?.storage ?? storage, this._makePredicate(entityKey, predicate))
     }
 
-    return void 100500
+    return undefined
   }
 
   async size(
@@ -229,8 +285,8 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
   ): Promise<number> {
     let result = 0
 
-    if (typeof options?.shard !== 'undefined' && this.client.internals.sharding.active && !this.provider.sharedCache) {
-      const shards = resolveShards(this.client, options.shard)
+    if (this.isShardedRequest(options)) {
+      const shards = resolveDiscordooShards(this.client, options.shard!)
 
       const request: IpcCacheSizeRequestPacket = {
         op: IpcOpCodes.CACHE_OPERATE,
@@ -238,7 +294,7 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
           op: IpcCacheOpCodes.SIZE,
           event_id: this.client.internals.ipc.generate(),
           keyspace,
-          storage,
+          storage: options?.storage ?? storage,
           shards,
           serialize: SerializeModes.NUMBER
         }
@@ -254,9 +310,9 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
     } else {
 
       if (this.provider.size) {
-        result = await this.provider.size(keyspace, storage)
+        result = await this.provider.size(keyspace, options?.storage ?? storage)
       } else {
-        result = await cacheProviderSizePolyfill<P>(this.provider, keyspace, storage)
+        result = await cacheProviderSizePolyfill<P>(this.provider, keyspace, options?.storage ?? storage)
       }
 
     }
@@ -272,8 +328,8 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
   ): Promise<boolean> {
     let result = false
 
-    if (typeof options?.shard !== 'undefined' && this.client.internals.sharding.active && !this.provider.sharedCache) {
-      const shards = resolveShards(this.client, options.shard)
+    if (this.isShardedRequest(options)) {
+      const shards = resolveDiscordooShards(this.client, options.shard!)
 
       const request: IpcCacheHasRequestPacket = {
         op: IpcOpCodes.CACHE_OPERATE,
@@ -281,7 +337,7 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
           op: IpcCacheOpCodes.HAS,
           event_id: this.client.internals.ipc.generate(),
           keyspace,
-          storage,
+          storage: options?.storage ?? storage,
           key,
           shards,
           serialize: SerializeModes.BOOLEAN
@@ -298,9 +354,9 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
     } else {
 
       if (this.provider.has) {
-        result = await this.provider.has<K>(keyspace, storage, key)
+        result = await this.provider.has<K>(keyspace, options?.storage ?? storage, key)
       } else {
-        result = await cacheProviderHasPolyfill<K, P>(this.provider, keyspace, storage, key)
+        result = await cacheProviderHasPolyfill<K, P>(this.provider, keyspace, options?.storage ?? storage, key)
       }
 
     }
@@ -316,8 +372,8 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
     options: CacheManagerSweepOptions = {}
   ): Promise<void> {
 
-    if (typeof options?.shard !== 'undefined' && this.client.internals.sharding.active && !this.provider.sharedCache) {
-      const shards = resolveShards(this.client, options.shard)
+    if (this.isShardedRequest(options)) {
+      const shards = resolveDiscordooShards(this.client, options.shard!)
 
       const request: IpcCacheSweepRequestPacket = {
         op: IpcOpCodes.CACHE_OPERATE,
@@ -325,8 +381,8 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
           op: IpcCacheOpCodes.SWEEP,
           event_id: this.client.internals.ipc.generate(),
           keyspace,
-          storage,
-          entityKey,
+          storage: options?.storage ?? storage,
+          entity_key: entityKey,
           shards,
           script: `(${predicate})`
         }
@@ -337,14 +393,16 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
     } else {
 
       if (this.provider.sweep) {
-        await this.provider.sweep<K, V, P>(keyspace, storage, this._makePredicate(entityKey, predicate))
+        await this.provider.sweep<K, V, P>(keyspace, options?.storage ?? storage, this._makePredicate(entityKey, predicate))
       } else {
-        await cacheProviderSweepPolyfill<K, V, P>(this.provider, keyspace, storage, this._makePredicate(entityKey, predicate))
+        await cacheProviderSweepPolyfill<K, V, P>(
+          this.provider, keyspace, options?.storage ?? storage, this._makePredicate(entityKey, predicate)
+        )
       }
 
     }
 
-    return void 100500
+    return undefined
   }
 
   async filter<K = string, V = any>(
@@ -356,8 +414,8 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
   ): Promise<[ K, V ][]> {
     let result: [ K, V ][] = []
 
-    if (typeof options?.shard !== 'undefined' && this.client.internals.sharding.active && !this.provider.sharedCache) {
-      const shards = resolveShards(this.client, options.shard)
+    if (this.isShardedRequest(options)) {
+      const shards = resolveDiscordooShards(this.client, options.shard!)
 
       const request: IpcCacheFilterRequestPacket = {
         op: IpcOpCodes.CACHE_OPERATE,
@@ -365,8 +423,8 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
           op: IpcCacheOpCodes.FILTER,
           event_id: this.client.internals.ipc.generate(),
           keyspace,
-          storage,
-          entityKey,
+          storage: options?.storage ?? storage,
+          entity_key: entityKey,
           shards,
           script: `(${predicate})`,
           serialize: SerializeModes.ARRAY
@@ -377,15 +435,19 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
         await this.client.internals.ipc.send<IpcCacheFilterResponsePacket>(request, { waitResponse: true })
 
       if (response.success) {
-        result = response.result
+        result = await Promise.all(response.result.map(this._makePredicate(entityKey, (v, k) => ([ k, v ]))))
       }
 
     } else {
 
       if (this.provider.filter) {
-        result = await this.provider.filter<K, V, P>(keyspace, storage, this._makePredicate(entityKey, predicate))
+        result = await this.provider.filter<K, V, P>(
+          keyspace, options?.storage ?? storage, this._makePredicate(entityKey, predicate)
+        )
       } else {
-        result = await cacheProviderFilterPolyfill<K, V, P>(this.provider, keyspace, storage, this._makePredicate(entityKey, predicate))
+        result = await cacheProviderFilterPolyfill<K, V, P>(
+          this.provider, keyspace, options?.storage ?? storage, this._makePredicate(entityKey, predicate)
+        )
       }
 
     }
@@ -402,8 +464,8 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
   ): Promise<R[]> {
     let result: R[] = []
 
-    if (typeof options?.shard !== 'undefined' && this.client.internals.sharding.active && !this.provider.sharedCache) {
-      const shards = resolveShards(this.client, options.shard)
+    if (this.isShardedRequest(options)) {
+      const shards = resolveDiscordooShards(this.client, options.shard!)
 
       const request: IpcCacheMapRequestPacket = {
         op: IpcOpCodes.CACHE_OPERATE,
@@ -411,8 +473,8 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
           op: IpcCacheOpCodes.MAP,
           event_id: this.client.internals.ipc.generate(),
           keyspace,
-          storage,
-          entityKey,
+          storage: options?.storage ?? storage,
+          entity_key: entityKey,
           shards,
           script: `(${predicate})`,
           serialize: SerializeModes.ARRAY
@@ -429,9 +491,13 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
     } else {
 
       if (this.provider.map) {
-        result = await this.provider.map<K, V, R, P>(keyspace, storage, this._makePredicate(entityKey, predicate))
+        result = await this.provider.map<K, V, R, P>(
+          keyspace, options?.storage ?? storage, this._makePredicate(entityKey, predicate)
+        )
       } else {
-        result = await cacheProviderMapPolyfill<K, V, R, P>(this.provider, keyspace, storage, this._makePredicate(entityKey, predicate))
+        result = await cacheProviderMapPolyfill<K, V, R, P>(
+          this.provider, keyspace, options?.storage ?? storage, this._makePredicate(entityKey, predicate)
+        )
       }
 
     }
@@ -448,8 +514,8 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
   ): Promise<V | undefined> {
     let result: V | undefined
 
-    if (typeof options?.shard !== 'undefined' && this.client.internals.sharding.active && !this.provider.sharedCache) {
-      const shards = resolveShards(this.client, options.shard)
+    if (this.isShardedRequest(options)) {
+      const shards = resolveDiscordooShards(this.client, options.shard!)
 
       const request: IpcCacheFindRequestPacket = {
         op: IpcOpCodes.CACHE_OPERATE,
@@ -457,8 +523,8 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
           op: IpcCacheOpCodes.FIND,
           event_id: this.client.internals.ipc.generate(),
           keyspace,
-          storage,
-          entityKey,
+          storage: options?.storage ?? storage,
+          entity_key: entityKey,
           shards,
           script: `(${predicate})`,
           serialize: SerializeModes.ANY
@@ -475,9 +541,101 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
     } else {
 
       if (this.provider.find) {
-        result = await this.provider.find<K, V, P>(keyspace, storage, this._makePredicate(entityKey, predicate))
+        result = await this.provider.find<K, V, P>
+        (keyspace, options?.storage ?? storage, this._makePredicate(entityKey, predicate)
+        )
       } else {
-        result = await cacheProviderFindPolyfill<K, V, P>(this.provider, keyspace, storage, this._makePredicate(entityKey, predicate))
+        result = await cacheProviderFindPolyfill<K, V, P>(
+          this.provider, keyspace, options?.storage ?? storage, this._makePredicate(entityKey, predicate)
+        )
+      }
+
+    }
+
+    result = await this._prepareData('out', result, entityKey)
+
+    return result
+  }
+
+  async clear(
+    keyspace: string,
+    storage: CacheStorageKey,
+    options: CacheManagerClearOptions = {}
+  ): Promise<boolean> {
+    if (this.isShardedRequest(options)) {
+      const shards = resolveDiscordooShards(this.client, options.shard!)
+
+      const request: IpcCacheClearRequestPacket = {
+        op: IpcOpCodes.CACHE_OPERATE,
+        d: {
+          op: IpcCacheOpCodes.CLEAR,
+          event_id: this.client.internals.ipc.generate(),
+          keyspace,
+          storage: options?.storage ?? storage,
+          shards,
+          serialize: SerializeModes.BOOLEAN
+        }
+      }
+
+      const { d: response } =
+        await this.client.internals.ipc.send<IpcCacheClearResponsePacket>(request, { waitResponse: true })
+
+      return response.success
+
+    } else {
+
+      if (this.provider.clear) {
+        return this.provider.clear(keyspace, options?.storage ?? storage)
+      } else {
+        return cacheProviderClearPolyfill<P>(this.provider, keyspace, options?.storage ?? storage)
+      }
+
+    }
+  }
+
+  async count<K = string, V = any>(
+    keyspace: string,
+    storage: CacheStorageKey,
+    entityKey: EntityKey,
+    predicate: (value: V, key: K, provider: P) => (boolean | Promise<boolean>),
+    options: CacheManagerCountOptions = {}
+  ): Promise<number> {
+    let result = 0
+
+    if (this.isShardedRequest(options)) {
+      const shards = resolveDiscordooShards(this.client, options.shard!)
+
+      const request: IpcCacheCountRequestPacket = {
+        op: IpcOpCodes.CACHE_OPERATE,
+        d: {
+          op: IpcCacheOpCodes.COUNT,
+          event_id: this.client.internals.ipc.generate(),
+          keyspace,
+          storage: options?.storage ?? storage,
+          entity_key: entityKey,
+          shards,
+          script: `(${predicate})`,
+          serialize: SerializeModes.NUMBER
+        }
+      }
+
+      const { d: response } =
+        await this.client.internals.ipc.send<IpcCacheCountResponsePacket>(request, { waitResponse: true })
+
+      if (response.success) {
+        result = response.result
+      }
+
+    } else {
+
+      if (this.provider.count) {
+        result = await this.provider.count<K, V, P>(
+          keyspace, options?.storage ?? storage, this._makePredicate(entityKey, predicate)
+        )
+      } else {
+        result = await cacheProviderCountPolyfill<K, V, P>(
+          this.provider, keyspace, options?.storage ?? storage, this._makePredicate(entityKey, predicate)
+        )
       }
 
     }
@@ -485,8 +643,172 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
     return result
   }
 
-  [Symbol.for('_ddooMakePredicate')](entityKey: EntityKey, predicate: any) { // for internal use by a library outside of this class
-    return this._makePredicate(entityKey, predicate)
+  async counts<K = string, V = any>(
+    keyspace: string,
+    storage: CacheStorageKey,
+    entityKey: EntityKey,
+    predicates: ((value: V, key: K, provider: P) => (boolean | Promise<boolean>))[],
+    options: CacheManagerCountsOptions = {}
+  ): Promise<number[]> {
+    let results: number[] = []
+
+    if (this.isShardedRequest(options)) {
+      const shards = resolveDiscordooShards(this.client, options.shard!)
+
+      const request: IpcCacheCountsRequestPacket = {
+        op: IpcOpCodes.CACHE_OPERATE,
+        d: {
+          op: IpcCacheOpCodes.COUNTS,
+          event_id: this.client.internals.ipc.generate(),
+          keyspace,
+          storage: options?.storage ?? storage,
+          entity_key: entityKey,
+          shards,
+          scripts: predicates.map(p => (`(${p})`)),
+          serialize: SerializeModes.NUMBERS_ARRAY
+        }
+      }
+
+      const { d: response } =
+        await this.client.internals.ipc.send<IpcCacheCountsResponsePacket>(request, { waitResponse: true })
+
+      if (response.success) {
+        results = response.result
+      }
+
+    } else {
+
+      if (this.provider.counts) {
+        results = await this.provider.counts<K, V, P>(
+          keyspace, options?.storage ?? storage, predicates.map(p => this._makePredicate(entityKey, p))
+        )
+      } else {
+        results = await cacheProviderCountsPolyfill<K, V, P>(
+          this.provider, keyspace, options?.storage ?? storage, predicates.map(p => this._makePredicate(entityKey, p))
+        )
+      }
+
+    }
+
+    return results
+  }
+
+  async keys<K = string>(
+    keyspace: string,
+    storage: CacheStorageKey,
+    entityKey: EntityKey,
+    options: CacheManagerKeysOptions = {}
+  ): Promise<K[]> {
+    if (this.isShardedRequest(options)) {
+      const shards = resolveDiscordooShards(this.client, options.shard!)
+
+      const request: IpcCacheKeysRequestPacket = {
+        op: IpcOpCodes.CACHE_OPERATE,
+        d: {
+          op: IpcCacheOpCodes.KEYS,
+          event_id: this.client.internals.ipc.generate(),
+          keyspace,
+          storage: options?.storage ?? storage,
+          shards,
+          serialize: SerializeModes.ARRAY,
+          entity_key: entityKey,
+        }
+      }
+
+      const { d: response } =
+        await this.client.internals.ipc.send<IpcCacheKeysResponsePacket>(request, { waitResponse: true })
+
+      return response.result
+
+    } else {
+
+      if (this.provider.keys) {
+        return this.provider.keys(keyspace, options?.storage ?? storage)
+      } else {
+        return cacheProviderKeysPolyfill<K, P>(this.provider, keyspace, options?.storage ?? storage)
+      }
+
+    }
+  }
+
+  async values<V = any>(
+    keyspace: string,
+    storage: CacheStorageKey,
+    entityKey: EntityKey,
+    options: CacheManagerValuesOptions = {}
+  ): Promise<V[]> {
+    if (this.isShardedRequest(options)) {
+      const shards = resolveDiscordooShards(this.client, options.shard!)
+
+      const request: IpcCacheValuesRequestPacket = {
+        op: IpcOpCodes.CACHE_OPERATE,
+        d: {
+          op: IpcCacheOpCodes.VALUES,
+          event_id: this.client.internals.ipc.generate(),
+          keyspace,
+          storage: options?.storage ?? storage,
+          shards,
+          serialize: SerializeModes.ARRAY,
+          entity_key: entityKey,
+        }
+      }
+
+      const { d: response } =
+        await this.client.internals.ipc.send<IpcCacheValuesResponsePacket>(request, { waitResponse: true })
+
+      return response.result
+
+    } else {
+
+      if (this.provider.values) {
+        return this.provider.values(keyspace, options?.storage ?? storage)
+      } else {
+        return cacheProviderValuesPolyfill<V, P>(this.provider, keyspace, options?.storage ?? storage)
+      }
+
+    }
+  }
+
+  async entries<K = string, V = any>(
+    keyspace: string,
+    storage: CacheStorageKey,
+    entityKey: EntityKey,
+    options: CacheManagerEntriesOptions = {}
+  ): Promise<Array<[ K, V ]>> {
+    if (this.isShardedRequest(options)) {
+      const shards = resolveDiscordooShards(this.client, options.shard!)
+
+      const request: IpcCacheEntriesRequestPacket = {
+        op: IpcOpCodes.CACHE_OPERATE,
+        d: {
+          op: IpcCacheOpCodes.ENTRIES,
+          event_id: this.client.internals.ipc.generate(),
+          keyspace,
+          storage: options?.storage ?? storage,
+          shards,
+          serialize: SerializeModes.ARRAY,
+          entity_key: entityKey,
+        }
+      }
+
+      const { d: response } =
+        await this.client.internals.ipc.send<IpcCacheEntriesResponsePacket>(request, { waitResponse: true })
+
+      return response.result
+
+    } else {
+
+      if (this.provider.entries) {
+        return this.provider.entries(keyspace, options?.storage ?? storage)
+      } else {
+        return cacheProviderEntriesPolyfill<K, V, P>(this.provider, keyspace, options?.storage ?? storage)
+      }
+
+    }
+  }
+
+  get [Symbol.for('_ddooPoliciesProcessor')](): CachingPoliciesProcessor { // for internal use by a library outside of this class
+    return this._policiesProcessor
   }
 
   init() {
@@ -498,16 +820,81 @@ export class CacheManager<P extends CacheProvider = CacheProvider> {
   }
 
   private _makePredicate(entityKey: EntityKey, predicate: any): any {
-    const entity: any = EntitiesUtil.get(entityKey)
-
     return async (value, key, prov) => {
-      let v = value
+      return predicate(await this._prepareData('out', value, entityKey), key, prov)
+    }
+  }
 
-      if (value && !(value instanceof entity)) {
-        v = await (new entity(this.client, value)).init?.()
+  private async _prepareData(direction: 'in' | 'out', data: any, entityKey: EntityKey, forIpcRequest?: boolean): Promise<any> {
+
+    if (forIpcRequest) return toJson(data)
+
+    if (direction === 'in') {
+      const pointer = isCachePointer(data)
+
+      if (pointer || entityKey === 'any') {
+        switch (this.provider.compatible) {
+          case 'classes':
+          case 'json':
+            return toJson(data)
+          case 'text':
+            return toJson(data, true)
+          case 'buffer':
+            return Buffer.from(toJson(data, true))
+        }
       }
 
-      return predicate(v, key, prov)
+      const Entity: any = EntitiesUtil.get(entityKey, data)
+
+      switch (this.provider.compatible) {
+        case 'classes':
+          if (!(data instanceof Entity)) data = await new Entity(this.client).init?.(data)
+          break
+        case 'json':
+          data = toJson(data)
+          break
+        case 'text':
+          data = toJson(data, true)
+          break
+        case 'buffer':
+          data = Buffer.from(toJson(data, true))
+          break
+      }
+
+      return data
+    } else if (direction === 'out') {
+      let jsonOrEntity: any
+
+      switch (this.provider.compatible) {
+        case 'classes':
+        case 'json':
+          jsonOrEntity = data
+          break
+        case 'text':
+          jsonOrEntity = data ? JSON.parse(data) : data
+          break
+        case 'buffer':
+          jsonOrEntity = data ? JSON.parse(data.toString('utf8')) : data
+          break
+      }
+
+      const pointer = isCachePointer(jsonOrEntity)
+
+      if (pointer) {
+        return await this.get(pointer[0], pointer[1], entityKey, pointer[2])
+      }
+
+      if (entityKey === 'any') {
+        return jsonOrEntity
+      }
+
+      if (jsonOrEntity) {
+        const Entity: any = EntitiesUtil.get(entityKey, jsonOrEntity)
+
+        if (!(jsonOrEntity instanceof Entity)) jsonOrEntity = await new Entity(this.client).init?.(jsonOrEntity)
+      }
+
+      return jsonOrEntity
     }
   }
 }

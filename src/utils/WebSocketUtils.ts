@@ -17,7 +17,11 @@ try {
 }
 
 try {
-  pako = require('pako')
+  pako = require('zlib-sync')
+} catch (e) {} // eslint-disable-line no-empty
+
+try {
+  if (!pako) pako = require('pako')
 } catch (e) {} // eslint-disable-line no-empty
 
 const decoder = new TextDecoder()
@@ -41,7 +45,7 @@ export class WebSocketUtils {
     return unpack(data)
   }
 
-  static exists(packet: any): boolean {
+  static exists<T>(packet: any): packet is T {
     return packet !== undefined && packet !== null
   }
 }

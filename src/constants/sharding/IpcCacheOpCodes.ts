@@ -9,4 +9,10 @@ export enum IpcCacheOpCodes {
   FILTER,
   MAP,
   FIND,
+  CLEAR,
+  COUNT,
+  COUNTS,
+  KEYS,
+  VALUES,
+  ENTRIES,
 }

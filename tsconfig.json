@@ -5,8 +5,8 @@
     "moduleResolution": "node",
     "target": "es2019",
     "lib": [
-      "es2020",
-      "dom"
+      "es2020", 
+      "dom" 
     ],
     "removeComments": false,
     "alwaysStrict": true,
@@ -22,14 +22,19 @@
     "noImplicitAny": false,
     "resolveJsonModule": true,
     "isolatedModules": false,
+    "skipLibCheck": true,
     "baseUrl": ".",
+    "allowSyntheticDefaultImports": true,
     "paths": {
       "@src/*": [ "src/*" ]
     },
     "outDir": "./dist",
     "plugins": [
       { "transform": "@zerollup/ts-transform-paths" },
-      { "transform": "typescript-is/lib/transform-inline/transformer" }
+      {
+        "transform": "typescript-is/lib/transform-inline/transformer",
+        "functionBehavior": "basic"
+      }
     ]
   },
   "exclude": [
